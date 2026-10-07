@@ -102,3 +102,35 @@ describe("formatting", () => {
     expect(s.warm.idleMinutes).toEqual({ "5m": 30, "1h": 60 });
   });
 });
+
+describe("herdr token", () => {
+  test("only big cold caches, marked uncertain for idle guesses", async () => {
+    const { herdrCacheValue } = await import("../src/core.ts");
+    expect(herdrCacheValue({ kind: "expired", idleMs: 1 }, 664_000, 3.19, DEFAULT_SETTINGS)).toBe("cold 664k");
+    expect(herdrCacheValue({ kind: "idle", idleMs: 1 }, 180_000, undefined, DEFAULT_SETTINGS)).toBe("cold? 180k");
+    expect(herdrCacheValue({ kind: "expired", idleMs: 1 }, 40_000, 0.19, DEFAULT_SETTINGS)).toBeUndefined();
+    expect(herdrCacheValue(undefined, 664_000, 3.19, DEFAULT_SETTINGS)).toBeUndefined();
+    expect(herdrCacheValue({ kind: "expired", idleMs: 1 }, 664_000, 3.19, mergeSettings(DEFAULT_SETTINGS, ['{"herdr":{"enabled":false}}']))).toBeUndefined();
+  });
+
+  test("speaks herdr's socket protocol", async () => {
+    const net = await import("node:net");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const { herdrRequest, sendHerdr } = await import("../src/herdr.ts");
+    const socketPath = path.join(os.tmpdir(), `cg-${process.pid}.sock`);
+    const lines: string[] = [];
+    const server = net.createServer((socket) => socket.on("data", (data) => { lines.push(String(data)); socket.end('{"id":"x","result":{}}\n'); }));
+    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+    try {
+      const target = { socketPath, paneId: "w1:p2" };
+      expect(await sendHerdr(target, herdrRequest(target, "pi", "cold 1M"))).toBe(true);
+      const request = JSON.parse(lines[0]!);
+      expect(request.method).toBe("pane.report_metadata");
+      expect(request.params).toMatchObject({ pane_id: "w1:p2", source: "cache-guard", agent: "pi", tokens: { cache: "cold 1M" } });
+      expect(await sendHerdr({ socketPath: "/nonexistent.sock", paneId: "x" }, request)).toBe(false);
+    } finally {
+      server.close();
+    }
+  });
+});

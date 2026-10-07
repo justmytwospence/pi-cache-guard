@@ -6,6 +6,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 import { type CacheView, type LastRequest, type ModelInfo, lastRequest, view } from "./clock.ts";
 import { loadSettings } from "./config.ts";
+import { HerdrReporter } from "./herdr.ts";
 import {
   DEFAULT_SETTINGS,
   NAME,
@@ -15,6 +16,7 @@ import {
   formatCost,
   formatDuration,
   formatTokens,
+  herdrCacheValue,
   missCost,
   worthWarning,
 } from "./core.ts";
@@ -53,7 +55,9 @@ export function coldCost(v: CacheView): number | undefined {
   return missCost(v.last.tokens, v.price, v.ttlMs ?? 5 * 60_000);
 }
 
-export default function cacheGuard(pi: ExtensionAPI) {
+export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrReporter } = {}) {
+  // Inside a herdr pane: the `cache` token, so herdr's agents sidebar shows this session when doomed.
+  const herdr = options.herdr ?? new HerdrReporter("pi");
   let ctx: ExtensionContext | undefined;
   let settings: Settings = DEFAULT_SETTINGS;
   let sessionOn = true;
@@ -75,11 +79,13 @@ export default function cacheGuard(pi: ExtensionAPI) {
 
   const publish = () => {
     if (!ctx) return;
-    const text = sessionOn && settings.enabled ? statusText(current(ctx)) : undefined;
+    const v = sessionOn && settings.enabled ? current(ctx) : undefined;
+    const text = statusText(v);
     if (text !== shown) {
       shown = text;
       ctx.ui.setStatus(STATUS_KEY, text);
     }
+    herdr.report(v ? herdrCacheValue(v.cold, v.last.tokens, coldCost(v), settings) : undefined);
   };
 
   const stop = () => {
@@ -87,6 +93,7 @@ export default function cacheGuard(pi: ExtensionAPI) {
     timer = undefined;
     if (ctx && shown !== undefined) ctx.ui.setStatus(STATUS_KEY, undefined);
     shown = undefined;
+    void herdr.clear();
     ctx = undefined;
     live = undefined;
   };

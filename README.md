@@ -30,6 +30,19 @@ never held.
 `cache cold (model)` or `cache cold?` (no TTL known, long idle). pi-status-footer folds it into its
 context row.
 
+**Tells herdr.** Inside a [herdr](https://herdr.dev) pane it reports the pane token `cache`:
+`cold 601k` (or `cold? 180k` for a guess from idle time) while the next prompt would re-cache at
+least the warning threshold, and clears it while the cache is warm or small, and when the session
+ends. Show it in herdr's agents sidebar with a custom token in `~/.config/herdr/config.toml`:
+
+```toml
+[ui.sidebar.agents]
+rows = [["state_icon", "workspace", { token = "$cache", fg = "#5f87d7", rules = [{ starts_with = "cold?", dim = true }] }]]
+```
+
+`src/herdr.ts` speaks herdr's socket protocol (`pane.report_metadata`, source `cache-guard`) and is
+shared verbatim with the opencode and Codex ports. `"herdr": { "enabled": false }` turns it off.
+
 **Keeps the cache warm: not here.** Pi does that itself. Set `"cacheWarming": "idle"` in
 `~/.pi/agent/settings.json`: Pi then re-sends the last request with a one-token output cap at 90%
 of the TTL, between runs too, while the expected saving is at least $0.05 and for up to 30 minutes
@@ -50,7 +63,7 @@ then the project's `.agents/cache-guard.json` and `.pi/cache-guard.json`. Later 
 merge. Pi reads `enabled` and `warn`:
 
 ```json
-{ "enabled": true, "warn": { "enabled": true, "minCost": 0.5, "minTokens": 100000, "idleMinutes": 180 } }
+{ "enabled": true, "warn": { "enabled": true, "minCost": 0.5, "minTokens": 100000, "idleMinutes": 180 }, "herdr": { "enabled": true } }
 ```
 
 `minTokens` applies only to models Pi has no prices for. `warm` settings are for the ports whose

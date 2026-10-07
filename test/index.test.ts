@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import cacheGuard, { modelInfo, statusText } from "../src/index.ts";
 import { lastRequest, view } from "../src/clock.ts";
+import { HerdrReporter, herdrTarget } from "../src/herdr.ts";
 
 const NOW = Date.parse("2026-10-07T12:00:00Z");
 const opus = {
@@ -51,6 +52,10 @@ describe("clock", () => {
 });
 
 function harness(entries: unknown[], model: any = opus) {
+  return harnessWith(entries, new HerdrReporter("pi", undefined), model);
+}
+
+function harnessWith(entries: unknown[], herdr: HerdrReporter, model: any = opus) {
   const handlers = new Map<string, Array<(event: any, ctx: any) => any>>();
   const commands = new Map<string, any>();
   const pi = {
@@ -69,7 +74,7 @@ function harness(entries: unknown[], model: any = opus) {
     notify: (message: string) => ui.notes.push(message),
   };
   const ctx = { cwd: "/nonexistent", hasUI: true, model, ui, sessionManager: { getBranch: () => entries } };
-  cacheGuard(pi as any);
+  cacheGuard(pi as any, { herdr });
   const emit = async (name: string, event: any) => {
     let result: unknown;
     for (const handler of handlers.get(name) ?? []) result = (await handler(event, ctx)) ?? result;
@@ -139,5 +144,48 @@ describe("extension", () => {
     await h.emit("session_start", {});
     await h.emit("message_start", { message: { role: "assistant", timestamp: NOW, provider: "anthropic", model: "claude-opus-5-5" } });
     expect(h.ui.status.get("cache-guard")).toBe("cache 5:00");
+  });
+});
+
+describe("herdr", () => {
+  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(NOW); });
+  afterEach(() => vi.useRealTimers());
+
+  function reporter() {
+    const sent: any[] = [];
+    const r = new HerdrReporter("pi", { socketPath: "/s", paneId: "w1:p1" }, async (_t, request) => { sent.push(request.params); return true; });
+    return { r, sent };
+  }
+
+  test("reports the cache token only when a big cache goes cold, and clears it", async () => {
+    const { r, sent } = reporter();
+    const entries: unknown[] = [assistant(NOW - 60_000, 600_000)];
+    const h = harnessWith(entries, r);
+    await h.emit("session_start", {});
+    expect(sent.map((p) => p.tokens.cache)).toEqual([null]); // stale token from an earlier session cleared
+    vi.advanceTimersByTime(60_000);
+    expect(sent.length).toBe(1); // still warm: nothing new
+    vi.advanceTimersByTime(200_000);
+    expect(sent.at(-1)).toMatchObject({ pane_id: "w1:p1", source: "cache-guard", agent: "pi", tokens: { cache: "cold 601k" }, ttl_ms: 86_400_000 });
+    entries.push(assistant(Date.now(), 610_000));
+    vi.advanceTimersByTime(1_000);
+    expect(sent.at(-1).tokens.cache).toBeNull();
+    vi.advanceTimersByTime(400_000);
+    expect(sent.at(-1).tokens.cache).toBe("cold 611k");
+    await h.emit("session_shutdown", {});
+    expect(sent.at(-1).tokens.cache).toBeNull();
+  });
+
+  test("small caches never show", async () => {
+    const { r, sent } = reporter();
+    const h = harnessWith([assistant(NOW - 900_000, 50_000)], r);
+    await h.emit("session_start", {});
+    vi.advanceTimersByTime(5_000);
+    expect(sent.map((p) => p.tokens.cache)).toEqual([null]);
+  });
+
+  test("outside herdr nothing is sent", () => {
+    expect(herdrTarget({})).toBeUndefined();
+    expect(herdrTarget({ HERDR_ENV: "1", HERDR_SOCKET_PATH: "/s", HERDR_PANE_ID: "w1:p1" })).toEqual({ socketPath: "/s", paneId: "w1:p1" });
   });
 });
