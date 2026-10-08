@@ -61,26 +61,55 @@ function harnessWith(entries: unknown[], herdr: HerdrReporter, model: any = opus
   const pi = {
     on: (name: string, handler: any) => { handlers.set(name, [...(handlers.get(name) ?? []), handler]); return () => undefined; },
     registerCommand: (name: string, options: any) => commands.set(name, options),
+    sendUserMessage: async (content: unknown, options?: any) => {
+      if (typeof content === "string" && content.startsWith("/cache-guard ") && options?.expandPromptTemplates) {
+        await commands.get("cache-guard").handler(content.slice("/cache-guard ".length), ctx);
+      } else sent.push({ session: "old", content });
+    },
   };
   const ui = {
     status: new Map<string, string | undefined>(),
     confirms: [] as string[],
+    menus: [] as string[][],
+    // Answers to successive selects, each a prefix of the option to pick (undefined: escape).
+    answers: [] as Array<string | undefined>,
     answer: "Send anyway" as string | undefined,
+    inputs: [] as Array<string | undefined>,
+    compactions: [] as any[],
     editor: "",
     notes: [] as string[],
     setStatus: (key: string, text: string | undefined) => ui.status.set(key, text),
-    select: async (title: string, options: string[]) => { ui.confirms.push(title); expect(options[0]).toMatch(/^Keep/); return ui.answer; },
+    select: async (title: string, options: string[]) => {
+      ui.menus.push(options);
+      if (title.startsWith("Prompt cache miss")) { ui.confirms.push(title); expect(options[0]).toMatch(/^Keep/); }
+      const answer = ui.answers.length ? ui.answers.shift() : ui.answer;
+      return answer === undefined ? undefined : options.find((option) => option.startsWith(answer));
+    },
+    input: async () => ui.inputs.shift(),
+    getEditorText: () => ui.editor,
     setEditorText: (text: string) => { ui.editor = text; },
     notify: (message: string) => ui.notes.push(message),
   };
-  const ctx = { cwd: "/nonexistent", hasUI: true, model, ui, sessionManager: { getBranch: () => entries } };
+  const sent: any[] = [];
+  const sessions: any[] = [];
+  const ctx: any = {
+    cwd: "/nonexistent", hasUI: true, model, ui,
+    sessionManager: { getBranch: () => entries, getSessionFile: () => "/sessions/old.jsonl" },
+    compact: (options: any) => ui.compactions.push(options),
+    newSession: async (options: any) => {
+      const fresh = { sendUserMessage: async (content: unknown) => sent.push({ session: "new", content }) };
+      sessions.push(options.parentSession);
+      await options.withSession(fresh);
+      return { cancelled: false };
+    },
+  };
   cacheGuard(pi as any, { herdr });
   const emit = async (name: string, event: any) => {
     let result: unknown;
     for (const handler of handlers.get(name) ?? []) result = (await handler(event, ctx)) ?? result;
     return result;
   };
-  return { emit, ui, ctx, commands };
+  return { emit, ui, ctx, commands, sent, sessions };
 }
 
 const input = (text: string, extra: Record<string, unknown> = {}) => ({ type: "input", text, source: "interactive", ...extra });
@@ -187,5 +216,81 @@ describe("herdr", () => {
   test("outside herdr nothing is sent", () => {
     expect(herdrTarget({})).toBeUndefined();
     expect(herdrTarget({ HERDR_ENV: "1", HERDR_SOCKET_PATH: "/s", HERDR_PANE_ID: "w1:p1" })).toEqual({ socketPath: "/s", paneId: "w1:p1" });
+  });
+});
+
+describe("choices", () => {
+  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(NOW); });
+  afterEach(() => vi.useRealTimers());
+  const cold = () => harness([assistant(NOW - 900_000, 600_000)]);
+
+  test("the menu prices each way through", async () => {
+    const h = cold();
+    await h.emit("session_start", {});
+    h.ui.answer = undefined;
+    await h.emit("input", input("next"));
+    expect(h.ui.menus[0]).toEqual([
+      "Keep the prompt in the editor",
+      "Start a new session with this prompt (no history, ~$0)",
+      "Compact first, then send it (~$2.40)",
+      "Send anyway (~$3.00)",
+      "Send, and stop asking in this session",
+    ]);
+  });
+
+  test("compact with focus on the prompt, then send it", async () => {
+    const h = cold();
+    await h.emit("session_start", {});
+    h.ui.answers = ["Compact", "Focus"];
+    expect(await h.emit("input", input("fix the parser"))).toEqual({ action: "handled" });
+    const compaction = h.ui.compactions[0];
+    expect(compaction.customInstructions).toContain("continue with the user's next request");
+    expect(compaction.customInstructions).toContain("fix the parser");
+    compaction.onComplete({});
+    await Promise.resolve();
+    expect(h.sent).toEqual([{ session: "old", content: "fix the parser" }]);
+  });
+
+  test("compact with written guidance; escape at the guidance keeps the prompt", async () => {
+    const h = cold();
+    await h.emit("session_start", {});
+    h.ui.answers = ["Compact", "Write"];
+    h.ui.inputs = ["keep the test plan"];
+    await h.emit("input", input("go"));
+    expect(h.ui.compactions[0].customInstructions).toBe("keep the test plan");
+    h.ui.answers = ["Compact", "Write"];
+    h.ui.inputs = [undefined];
+    expect(await h.emit("input", input("go"))).toEqual({ action: "handled" });
+    expect(h.ui.compactions.length).toBe(1);
+    expect(h.ui.editor).toBe("go");
+  });
+
+  test("a failed compaction puts the prompt back", async () => {
+    const h = cold();
+    await h.emit("session_start", {});
+    h.ui.answers = ["Compact", "Default"];
+    await h.emit("input", input("go"));
+    expect(h.ui.compactions[0].customInstructions).toBeUndefined();
+    h.ui.compactions[0].onError(new Error("nope"));
+    expect(h.ui.editor).toBe("go");
+  });
+
+  test("start fresh carries the prompt into a new linked session", async () => {
+    const h = cold();
+    await h.emit("session_start", {});
+    h.ui.answers = ["Start a new session"];
+    expect(await h.emit("input", input("new topic"))).toEqual({ action: "handled" });
+    await vi.runOnlyPendingTimersAsync();
+    expect(h.sessions).toEqual(["/sessions/old.jsonl"]);
+    expect(h.sent).toEqual([{ session: "new", content: "new topic" }]);
+  });
+
+  test("stop asking: sends now and later without the menu", async () => {
+    const h = cold();
+    await h.emit("session_start", {});
+    h.ui.answers = ["Send, and stop"];
+    expect(await h.emit("input", input("a"))).toEqual({ action: "continue" });
+    expect(await h.emit("input", input("b"))).toEqual({ action: "continue" });
+    expect(h.ui.confirms.length).toBe(1);
   });
 });

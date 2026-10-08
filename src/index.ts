@@ -3,6 +3,7 @@
 // row). Keeping the cache warm is Pi's own job: `cacheWarming: "idle"` in settings.json. Its
 // refreshes are `cache_warm` usage entries, which this clock reads as cache activity.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 
 import { type CacheView, type LastRequest, type ModelInfo, lastRequest, view } from "./clock.ts";
 import { loadSettings } from "./config.ts";
@@ -16,6 +17,8 @@ import {
   formatCost,
   formatDuration,
   formatTokens,
+  choiceCosts,
+  compactionFocus,
   herdrCacheValue,
   missCost,
   worthWarning,
@@ -23,8 +26,10 @@ import {
 
 const STATUS_KEY = NAME;
 const TICK_MS = 1_000;
-const KEEP = "Keep the prompt in the editor (/compact or /new first is cheaper)";
-const SEND = "Send anyway";
+/** The guidance choices after "Compact first". */
+const SUMMARY_DEFAULT = "Default summary";
+const SUMMARY_FOCUS = "Focus the summary on this prompt";
+const SUMMARY_WRITE = "Write guidance for the summary...";
 
 type ModelLike = NonNullable<ExtensionContext["model"]>;
 
@@ -49,6 +54,24 @@ export function statusText(v: CacheView | undefined): string | undefined {
   return undefined;
 }
 
+export type Choice = "keep" | "compact" | "fresh" | "send" | "mute";
+
+/**
+ * The ways through a cold cache, labelled with what they cost. Keeping the prompt is first, so a
+ * reflexive Enter does not spend the re-cache; the rest run from cheapest to dearest.
+ */
+export function choiceMenu(v: CacheView): Array<{ choice: Choice; label: string }> {
+  const costs = v.price ? choiceCosts(v.last.tokens, v.price, v.ttlMs ?? 5 * 60_000) : undefined;
+  const about = (cost: number | undefined) => (cost === undefined ? "" : ` (~${formatCost(cost)})`);
+  return [
+    { choice: "keep", label: "Keep the prompt in the editor" },
+    { choice: "fresh", label: "Start a new session with this prompt (no history, ~$0)" },
+    { choice: "compact", label: `Compact first, then send it${about(costs?.compact)}` },
+    { choice: "send", label: `Send anyway${about(costs?.send)}` },
+    { choice: "mute", label: "Send, and stop asking in this session" },
+  ];
+}
+
 /** The cost of the miss `v` describes, in dollars at list prices, when Pi knows the model's prices. */
 export function coldCost(v: CacheView): number | undefined {
   if (!v.cold || !v.price) return undefined;
@@ -61,6 +84,10 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
   let ctx: ExtensionContext | undefined;
   let settings: Settings = DEFAULT_SETTINGS;
   let sessionOn = true;
+  // "Send, and stop asking": the warning is off for this session, the clock and herdr stay on.
+  let askOn = true;
+  // A held prompt the `/cache-guard fresh` command carries into a new session.
+  let pending: { text: string; images?: ImageContent[] } | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
   let shown: string | undefined;
   // Request start of the assistant message streaming now; the branch only has it at message_end.
@@ -102,6 +129,7 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
     stop();
     ctx = context;
     sessionOn = true;
+    askOn = true;
     settings = loadSettings(context.cwd);
     if (!context.hasUI) return;
     publish();
@@ -131,7 +159,7 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
   });
 
   pi.on("input", async (event, context) => {
-    if (!sessionOn || event.source !== "interactive" || event.streamingBehavior !== undefined || !context.hasUI) {
+    if (!sessionOn || !askOn || event.source !== "interactive" || event.streamingBehavior !== undefined || !context.hasUI) {
       return { action: "continue" };
     }
     const text = event.text.trim();
@@ -141,20 +169,77 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
     if (!v?.cold) return { action: "continue" };
     const cost = coldCost(v);
     if (!worthWarning(v.last.tokens, cost, settings)) return { action: "continue" };
-    // Keeping the prompt is first, so a reflexive Enter does not spend the re-cache.
-    const choice = await context.ui.select(`Prompt cache miss. ${describeMiss(v.cold, v.last.tokens, cost)}`, [KEEP, SEND]);
-    if (choice === SEND) return { action: "continue" };
-    context.ui.setEditorText(event.text);
-    return { action: "handled" };
+    const menu = choiceMenu(v);
+    const label = await context.ui.select(`Prompt cache miss. ${describeMiss(v.cold, v.last.tokens, cost)}`, menu.map((item) => item.label));
+    const choice = menu.find((item) => item.label === label)?.choice ?? "keep";
+    const keep = () => {
+      context.ui.setEditorText(event.text);
+      return { action: "handled" as const };
+    };
+    const content: string | (TextContent | ImageContent)[] = event.images?.length
+      ? [{ type: "text", text: event.text }, ...event.images]
+      : event.text;
+    switch (choice) {
+      case "send":
+        return { action: "continue" };
+      case "mute":
+        askOn = false;
+        return { action: "continue" };
+      case "fresh":
+        // Replacing the session is a command's job: run ours once this input has been handled.
+        pending = { text: event.text, images: event.images };
+        setTimeout(() => void pi.sendUserMessage(`/${NAME} fresh`, { expandPromptTemplates: true }), 0);
+        return { action: "handled" };
+      case "compact": {
+        const how = await context.ui.select("Compact first: what should the summary keep?", [SUMMARY_DEFAULT, SUMMARY_FOCUS, SUMMARY_WRITE]);
+        let guidance: string | undefined;
+        if (how === SUMMARY_FOCUS) guidance = compactionFocus(event.text);
+        else if (how === SUMMARY_WRITE) {
+          guidance = await context.ui.input("Guidance for the summary", "what to keep or stress");
+          if (guidance === undefined) return keep();
+        } else if (how !== SUMMARY_DEFAULT) return keep();
+        context.ui.notify("Compacting, then sending your prompt.", "info");
+        context.compact({
+          customInstructions: guidance?.trim() || undefined,
+          onComplete: () => void pi.sendUserMessage(content),
+          onError: (error) => {
+            context.ui.notify(`Compaction failed (${error.message}); your prompt is back in the editor.`, "warning");
+            context.ui.setEditorText(event.text);
+          },
+        });
+        return { action: "handled" };
+      }
+      default:
+        return keep();
+    }
   });
 
   pi.registerCommand(NAME, {
     description: "Prompt cache: status, on, or off (this session)",
-    getArgumentCompletions: (prefix) => ["status", "on", "off"].filter((v) => v.startsWith(prefix)).map((value) => ({ value, label: value })),
+    getArgumentCompletions: (prefix) => ["status", "on", "off", "fresh"].filter((v) => v.startsWith(prefix)).map((value) => ({ value, label: value })),
     handler: async (args, context) => {
       const command = args.trim() || "status";
+      if (command === "fresh") {
+        // A new session (linked to this one) that starts with the held prompt, or the editor's text.
+        const carry = pending ?? (context.ui.getEditorText().trim() ? { text: context.ui.getEditorText() } : undefined);
+        pending = undefined;
+        if (!carry) {
+          context.ui.notify("/cache-guard fresh starts a new session with the prompt in the editor; the editor is empty.", "info");
+          return;
+        }
+        const parentSession = context.sessionManager.getSessionFile();
+        const result = await context.newSession({
+          parentSession,
+          withSession: async (fresh) => {
+            await fresh.sendUserMessage(carry.images?.length ? [{ type: "text", text: carry.text }, ...carry.images] : carry.text);
+          },
+        });
+        if (result.cancelled) context.ui.setEditorText(carry.text);
+        return;
+      }
       if (command === "on" || command === "off") {
         sessionOn = command === "on";
+        askOn = sessionOn;
         ctx = context;
         publish();
         context.ui.notify(`cache-guard ${command} for this session`, "info");
