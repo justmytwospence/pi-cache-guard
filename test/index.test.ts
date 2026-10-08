@@ -61,10 +61,13 @@ function harnessWith(entries: unknown[], herdr: HerdrReporter, model: any = opus
   const pi = {
     on: (name: string, handler: any) => { handlers.set(name, [...(handlers.get(name) ?? []), handler]); return () => undefined; },
     registerCommand: (name: string, options: any) => commands.set(name, options),
+    getThinkingLevel: () => "high",
+    setThinkingLevel: (level: string) => sent.push({ thinking: level }),
+    setModel: async (m: any) => { sent.push({ model: m.id }); return true; },
     sendUserMessage: async (content: unknown, options?: any) => {
       if (typeof content === "string" && content.startsWith("/cache-guard ") && options?.expandPromptTemplates) {
         await commands.get("cache-guard").handler(content.slice("/cache-guard ".length), ctx);
-      } else sent.push({ session: "old", content });
+      } else sent.push({ session: ctx.sessionManager.getBranch().length ? "old" : "new", content });
     },
   };
   const ui = {
@@ -96,10 +99,11 @@ function harnessWith(entries: unknown[], herdr: HerdrReporter, model: any = opus
     cwd: "/nonexistent", hasUI: true, model, ui,
     sessionManager: { getBranch: () => entries, getSessionFile: () => "/sessions/old.jsonl" },
     compact: (options: any) => ui.compactions.push(options),
+    modelRegistry: { find: (provider: string, id: string) => ({ ...model, provider, id }) },
     newSession: async (options: any) => {
-      const fresh = { sendUserMessage: async (content: unknown) => sent.push({ session: "new", content }) };
       sessions.push(options.parentSession);
-      await options.withSession(fresh);
+      ctx.sessionManager.getBranch = () => [];
+      await emit("session_start", { type: "session_start", reason: "new" });
       return { cancelled: false };
     },
   };
@@ -282,7 +286,8 @@ describe("choices", () => {
     expect(await h.emit("input", input("new topic"))).toEqual({ action: "handled" });
     await vi.runOnlyPendingTimersAsync();
     expect(h.sessions).toEqual(["/sessions/old.jsonl"]);
-    expect(h.sent).toEqual([{ session: "new", content: "new topic" }]);
+    await vi.runOnlyPendingTimersAsync();
+    expect(h.sent).toEqual([{ thinking: "high" }, { session: "new", content: "new topic" }]);
   });
 
   test("stop asking: sends now and later without the menu", async () => {

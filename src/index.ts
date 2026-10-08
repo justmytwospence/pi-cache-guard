@@ -54,6 +54,16 @@ export function statusText(v: CacheView | undefined): string | undefined {
   return undefined;
 }
 
+/** What `/cache-guard fresh` hands the new session's runtime. */
+interface FreshStart {
+  text: string;
+  images?: ImageContent[];
+  provider?: string;
+  modelId?: string;
+  thinking?: string;
+}
+const FRESH_KEY = Symbol.for("pi-cache-guard/fresh");
+
 export type Choice = "keep" | "compact" | "fresh" | "send" | "mute";
 
 /**
@@ -125,8 +135,13 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
     live = undefined;
   };
 
-  pi.on("session_start", (_event, context) => {
+  pi.on("session_start", (event, context) => {
     stop();
+    const fresh = event.reason === "new" ? (globalThis as Record<symbol, unknown>)[FRESH_KEY] as FreshStart | undefined : undefined;
+    if (fresh) {
+      delete (globalThis as Record<symbol, unknown>)[FRESH_KEY];
+      void startFresh(pi, context, fresh);
+    }
     ctx = context;
     sessionOn = true;
     askOn = true;
@@ -227,14 +242,19 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
           context.ui.notify("/cache-guard fresh starts a new session with the prompt in the editor; the editor is empty.", "info");
           return;
         }
-        const parentSession = context.sessionManager.getSessionFile();
-        const result = await context.newSession({
-          parentSession,
-          withSession: async (fresh) => {
-            await fresh.sendUserMessage(carry.images?.length ? [{ type: "text", text: carry.text }, ...carry.images] : carry.text);
-          },
-        });
-        if (result.cancelled) context.ui.setEditorText(carry.text);
+        // The new session gets a fresh extension runtime: hand it the prompt, model and thinking
+        // level through a process-wide slot that its session_start picks up.
+        (globalThis as Record<symbol, unknown>)[FRESH_KEY] = {
+          ...carry,
+          provider: context.model?.provider,
+          modelId: context.model?.id,
+          thinking: pi.getThinkingLevel(),
+        } satisfies FreshStart;
+        const result = await context.newSession({ parentSession: context.sessionManager.getSessionFile() });
+        if (result.cancelled) {
+          delete (globalThis as Record<symbol, unknown>)[FRESH_KEY];
+          context.ui.setEditorText(carry.text);
+        }
         return;
       }
       if (command === "on" || command === "off") {
@@ -268,4 +288,12 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
       context.ui.notify(lines.join("\n"), "info");
     },
   });
+}
+
+/** In the new session: the old session's model and thinking level, then the held prompt. */
+async function startFresh(pi: ExtensionAPI, context: ExtensionContext, fresh: FreshStart): Promise<void> {
+  const model = fresh.provider && fresh.modelId ? context.modelRegistry.find(fresh.provider, fresh.modelId) : undefined;
+  if (model && (context.model?.provider !== model.provider || context.model?.id !== model.id)) await pi.setModel(model);
+  if (fresh.thinking) pi.setThinkingLevel(fresh.thinking as Parameters<ExtensionAPI["setThinkingLevel"]>[0]);
+  setTimeout(() => void pi.sendUserMessage(fresh.images?.length ? [{ type: "text", text: fresh.text }, ...fresh.images] : fresh.text), 0);
 }
