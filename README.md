@@ -13,12 +13,34 @@ and shows how long the prompt cache has left. Part of the cache-guard family:
 `PI_CACHE_RETENTION=long`) from the start of the last request that used it. The first prompt after
 that writes the whole conversation to the cache again, at 1.25x (or 2x) the input price instead of
 0.05-0.1x for a read. When that rewrite would cost at least `warn.minCost` (default $0.50 at API
-prices), the prompt waits for a confirm dialog:
+prices), the prompt waits for a choice:
 
 ```
-The prompt cache expired 10m ago: this prompt re-caches 601k tokens (~$2.88 at API prices).
-Send anyway? (No keeps the prompt in the editor; /compact or /new first is cheaper.)
+Prompt cache miss. The prompt cache expired 10m ago: this prompt re-caches 601k tokens (~$2.88 at API prices).
+-> Keep the prompt in the editor
+   Start a new session with this prompt (no history, ~$0)
+   Compact first, then send it (~$2.40)
+   Send anyway (~$3.00)
+   Send, and stop asking in this session
 ```
+
+The options:
+
+- **Keep the prompt in the editor.** This is the default, so a reflexive Enter, or Esc, spends
+  nothing.
+- **Start a new session.** Opens a new session linked to this one, on the same model and thinking
+  level, and sends the prompt there. Also available as `/cache-guard fresh`, which takes the
+  editor's text.
+- **Compact first.** Asks what the summary should keep: Pi's default summary, a summary focused on
+  the held prompt (keep what it needs, drop the rest), or your own guidance. It then compacts and
+  sends the prompt onto the small context. Compacting reads the history once, at input price
+  instead of a cache write. If compaction fails (for example the session is too small), the prompt
+  goes back in the editor.
+- **Send anyway**, or **Send, and stop asking in this session.** The second keeps the clock and
+  the herdr token running.
+
+The headline cost is what the miss adds over a cache hit. The costs in the options are each
+path's total.
 
 It also asks when the selected model differs from the one the conversation was cached for (each
 model has its own cache). For models without a published TTL (OpenAI and Codex models) it asks
