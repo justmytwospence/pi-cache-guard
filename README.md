@@ -17,17 +17,17 @@ prices), the prompt waits for a choice:
 
 ```
 Prompt cache miss. The prompt cache expired 10m ago: this prompt re-caches 601k tokens (~$2.88 at API prices).
--> Keep the prompt in the editor
-   Start a new session with this prompt (no history, ~$0)
-   Compact first, then send it (~$2.40)
-   Send anyway (~$3.00)
+-> Send anyway (~$3.00)
    Send, and stop asking in this session
+   Compact first, then send it (~$2.40)
+   Start a new session with this prompt (no history, ~$0)
+   Keep the prompt in the editor
 ```
 
 The options:
 
-- **Keep the prompt in the editor.** This is the default, so a reflexive Enter, or Esc, spends
-  nothing.
+- **Send anyway**, or **Send, and stop asking in this session.** Sending is the default, so Enter
+  sends as if nothing had asked. The second keeps the clock and the herdr token running.
 - **Start a new session.** Opens a new session linked to this one, on the same model and thinking
   level, and sends the prompt there. Also available as `/cache-guard fresh`, which takes the
   editor's text.
@@ -36,8 +36,7 @@ The options:
   sends the prompt onto the small context. Compacting reads the history once, at input price
   instead of a cache write. If compaction fails (for example the session is too small), the prompt
   goes back in the editor.
-- **Send anyway**, or **Send, and stop asking in this session.** The second keeps the clock and
-  the herdr token running.
+- **Keep the prompt in the editor.** Esc does the same, and spends nothing.
 
 The headline cost is what the miss adds over a cache hit. The costs in the options are each
 path's total.

@@ -84,7 +84,7 @@ function harnessWith(entries: unknown[], herdr: HerdrReporter, model: any = opus
     setStatus: (key: string, text: string | undefined) => ui.status.set(key, text),
     select: async (title: string, options: string[]) => {
       ui.menus.push(options);
-      if (title.startsWith("Prompt cache miss")) { ui.confirms.push(title); expect(options[0]).toMatch(/^Keep/); }
+      if (title.startsWith("Prompt cache miss")) { ui.confirms.push(title); expect(options[0]).toMatch(/^Send anyway/); }
       const answer = ui.answers.length ? ui.answers.shift() : ui.answer;
       return answer === undefined ? undefined : options.find((option) => option.startsWith(answer));
     },
@@ -234,11 +234,11 @@ describe("choices", () => {
     h.ui.answer = undefined;
     await h.emit("input", input("next"));
     expect(h.ui.menus[0]).toEqual([
-      "Keep the prompt in the editor",
-      "Start a new session with this prompt (no history, ~$0)",
-      "Compact first, then send it (~$2.40)",
       "Send anyway (~$3.00)",
       "Send, and stop asking in this session",
+      "Compact first, then send it (~$2.40)",
+      "Start a new session with this prompt (no history, ~$0)",
+      "Keep the prompt in the editor",
     ]);
   });
 

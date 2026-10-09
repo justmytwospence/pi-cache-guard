@@ -67,18 +67,18 @@ const FRESH_KEY = Symbol.for("pi-cache-guard/fresh");
 export type Choice = "keep" | "compact" | "fresh" | "send" | "mute";
 
 /**
- * The ways through a cold cache, labelled with what they cost. Keeping the prompt is first, so a
- * reflexive Enter does not spend the re-cache; the rest run from cheapest to dearest.
+ * The ways through a cold cache, labelled with what they cost. Sending is first, so Enter sends as
+ * if nothing had asked; Esc still keeps the prompt in the editor.
  */
 export function choiceMenu(v: CacheView): Array<{ choice: Choice; label: string }> {
   const costs = v.price ? choiceCosts(v.last.tokens, v.price, v.ttlMs ?? 5 * 60_000) : undefined;
   const about = (cost: number | undefined) => (cost === undefined ? "" : ` (~${formatCost(cost)})`);
   return [
-    { choice: "keep", label: "Keep the prompt in the editor" },
-    { choice: "fresh", label: "Start a new session with this prompt (no history, ~$0)" },
-    { choice: "compact", label: `Compact first, then send it${about(costs?.compact)}` },
     { choice: "send", label: `Send anyway${about(costs?.send)}` },
     { choice: "mute", label: "Send, and stop asking in this session" },
+    { choice: "compact", label: `Compact first, then send it${about(costs?.compact)}` },
+    { choice: "fresh", label: "Start a new session with this prompt (no history, ~$0)" },
+    { choice: "keep", label: "Keep the prompt in the editor" },
   ];
 }
 
