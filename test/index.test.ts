@@ -58,9 +58,13 @@ function harness(entries: unknown[], model: any = opus) {
 function harnessWith(entries: unknown[], herdr: HerdrReporter, model: any = opus) {
   const handlers = new Map<string, Array<(event: any, ctx: any) => any>>();
   const commands = new Map<string, any>();
+  const renderers = new Map<string, any>();
+  const appended: Array<{ customType: string; data: any }> = [];
   const pi = {
     on: (name: string, handler: any) => { handlers.set(name, [...(handlers.get(name) ?? []), handler]); return () => undefined; },
     registerCommand: (name: string, options: any) => commands.set(name, options),
+    registerEntryRenderer: (type: string, renderer: any) => renderers.set(type, renderer),
+    appendEntry: (customType: string, data: unknown) => appended.push({ customType, data }),
     getThinkingLevel: () => "high",
     setThinkingLevel: (level: string) => sent.push({ thinking: level }),
     setModel: async (m: any) => { sent.push({ model: m.id }); return true; },
@@ -113,7 +117,7 @@ function harnessWith(entries: unknown[], herdr: HerdrReporter, model: any = opus
     for (const handler of handlers.get(name) ?? []) result = (await handler(event, ctx)) ?? result;
     return result;
   };
-  return { emit, ui, ctx, commands, sent, sessions };
+  return { emit, ui, ctx, commands, sent, sessions, appended, renderers };
 }
 
 const input = (text: string, extra: Record<string, unknown> = {}) => ({ type: "input", text, source: "interactive", ...extra });
@@ -297,5 +301,28 @@ describe("choices", () => {
     expect(await h.emit("input", input("a"))).toEqual({ action: "continue" });
     expect(await h.emit("input", input("b"))).toEqual({ action: "continue" });
     expect(h.ui.confirms.length).toBe(1);
+  });
+});
+
+describe("notices", () => {
+  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(NOW); });
+  afterEach(() => vi.useRealTimers());
+
+  test("a miss is written after the turn; new keep-warm refreshes once each", async () => {
+    const entries: any[] = [assistant(NOW - 600_000, 600_000), { ...warm(NOW - 400_000, 600_000), id: "w0" }];
+    const h = harness(entries);
+    await h.emit("session_start", {});
+    expect(h.appended).toEqual([]);
+    const message = { role: "assistant", provider: "anthropic", model: opus.id, timestamp: NOW, stopReason: "stop",
+      usage: { input: 2, cacheRead: 0, cacheWrite: 601_000, output: 10, cost: { input: 0, cacheRead: 0, cacheWrite: 3 } } };
+    await h.emit("message_end", { message });
+    expect(h.appended).toEqual([]);
+    await h.emit("turn_end", {});
+    expect(h.appended).toEqual([{ customType: "cache-guard-notice", data: expect.objectContaining({ kind: "miss", missedTokens: 600_002 }) }]);
+    entries.push({ type: "message", message }, { ...warm(NOW + 1_000, 600_000), id: "w1", usage: { input: 2, cacheRead: 600_000, cacheWrite: 0, output: 1, cost: { total: 0.12 } } });
+    vi.advanceTimersByTime(2_000);
+    vi.advanceTimersByTime(2_000);
+    expect(h.appended.slice(1)).toEqual([{ customType: "cache-guard-notice", data: { kind: "warm", cost: 0.12, note: undefined } }]);
+    await h.emit("session_shutdown", {});
   });
 });

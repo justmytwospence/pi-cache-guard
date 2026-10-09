@@ -8,6 +8,8 @@ import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { type CacheView, type LastRequest, type ModelInfo, lastRequest, view } from "./clock.ts";
 import { loadSettings } from "./config.ts";
 import { HerdrReporter } from "./herdr.ts";
+import { type AssistantLike, NOTICE_TYPE, type Notice, detectMiss, noticeLine } from "./notices.ts";
+import { Text } from "@earendil-works/pi-tui";
 import {
   DEFAULT_SETTINGS,
   NAME,
@@ -93,6 +95,32 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
   const herdr = options.herdr ?? new HerdrReporter("pi");
   let ctx: ExtensionContext | undefined;
   let settings: Settings = DEFAULT_SETTINGS;
+  // A miss found at message_end, written at turn_end once the message itself is in the session.
+  let pendingMiss: Notice | undefined;
+  // Keep-warm refreshes already noted (Pi has no event for them; the tick looks for new ones).
+  let seenWarm = new Set<string>();
+
+  const notify = (notice: Notice) => {
+    if (sessionOn && settings.enabled && ctx?.hasUI) pi.appendEntry<Notice>(NOTICE_TYPE, notice);
+  };
+  /** `cache_warm` usage entries after the last assistant message, oldest first. */
+  const recentWarms = (context: ExtensionContext) => {
+    const branch = context.sessionManager.getBranch() as Array<{ id?: string; type?: string; kind?: string; note?: string; usage?: { cost?: { total?: number } }; message?: { role?: string } }>;
+    const warms = [];
+    for (let i = branch.length - 1; i >= 0; i--) {
+      const entry = branch[i]!;
+      if (entry.type === "message" && entry.message?.role === "assistant") break;
+      if (entry.type === "usage" && entry.kind === "cache_warm" && entry.id) warms.unshift(entry);
+    }
+    return warms;
+  };
+  const noteWarms = (context: ExtensionContext) => {
+    for (const entry of recentWarms(context)) {
+      if (seenWarm.has(entry.id!)) continue;
+      seenWarm.add(entry.id!);
+      notify({ kind: "warm", cost: entry.usage?.cost?.total ?? 0, note: entry.note });
+    }
+  };
   let sessionOn = true;
   // "Send, and stop asking": the warning is off for this session, the clock and herdr stay on.
   let askOn = true;
@@ -116,6 +144,7 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
 
   const publish = () => {
     if (!ctx) return;
+    noteWarms(ctx);
     const v = sessionOn && settings.enabled ? current(ctx) : undefined;
     const text = statusText(v);
     if (text !== shown) {
@@ -146,6 +175,8 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
     sessionOn = true;
     askOn = true;
     settings = loadSettings(context.cwd);
+    pendingMiss = undefined;
+    seenWarm = new Set(recentWarms(context).map((entry) => entry.id!));
     if (!context.hasUI) return;
     publish();
     timer = setInterval(publish, TICK_MS);
@@ -161,7 +192,31 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
   };
   pi.on("model_select", (_event, context) => refresh(context, false));
   pi.on("session_tree", (_event, context) => refresh(context, false));
-  pi.on("session_compact", (_event, context) => refresh(context, false));
+  pi.on("session_compact", (event, context) => {
+    const usage = (event.compactionEntry as { usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: { total: number } } }).usage;
+    if (ctx && usage) {
+      notify({ kind: "compaction", tokens: usage.input + usage.output + usage.cacheRead + usage.cacheWrite, cost: usage.cost.total });
+    }
+    refresh(context, false);
+  });
+  pi.on("message_end", (event, context) => {
+    const message = event.message as unknown as AssistantLike;
+    if (!ctx || message.role !== "assistant" || !message.usage || message.stopReason === "error" || message.stopReason === "aborted") return;
+    // The session does not have this message yet, so the branch ends at the request before it.
+    pendingMiss = detectMiss(context.sessionManager.getBranch(), message, (provider, id) => context.modelRegistry.find(provider, id)?.cost.cacheRead);
+  });
+  const flushMiss = () => {
+    if (pendingMiss) notify(pendingMiss);
+    pendingMiss = undefined;
+  };
+  pi.on("turn_end", () => flushMiss());
+  pi.on("agent_end", () => flushMiss());
+
+  pi.registerEntryRenderer<Notice>(NOTICE_TYPE, (entry, _options, theme) => {
+    if (!entry.data) return undefined;
+    const { text, color } = noticeLine(entry.data);
+    return new Text(theme.fg(color, text), 1, 0);
+  });
   pi.on("agent_settled", (_event, context) => refresh(context, true));
   pi.on("message_start", (event, context) => {
     const message = event.message as { role?: string; timestamp?: number; provider?: string; model?: string };

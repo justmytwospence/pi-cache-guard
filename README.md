@@ -69,7 +69,14 @@ shared verbatim with the opencode and Codex ports. `"herdr": { "enabled": false 
 of the TTL, between runs too, while the expected saving is at least $0.05 and for up to 30 minutes
 after the last real request (`/session` shows its next decision). Those refreshes are recorded as
 `cache_warm` usage entries, and this extension's clock counts the ones that hit the cache.
-`showCacheMissNotices: true` makes Pi print a line for each refresh and each significant miss.
+
+**Notes misses in the transcript.** A line after each turn that re-billed a significant part of
+the conversation (`Cache miss after 12m idle: 600k tokens re-billed (~$2.88)`, from 20k tokens or
+$0.10), one for each keep-warm refresh (`Cache warmed: $0.0123`) and one for what a compaction
+billed. These are Pi's own `showCacheMissNotices` lines; that setting also prints `Anthropic
+dropped N thinking blocks` after every turn, so leave it off and let this extension print the
+cache lines. They are custom session entries (never sent to the model), so they show again on
+resume. `/cache-guard off` stops them for the session.
 
 ## Commands
 
