@@ -2,12 +2,18 @@
 // prompt cache's time left as the `cache-guard` status (pi-status-footer folds it into its context
 // row). Keeping the cache warm is Pi's own job: `cacheWarming: "idle"` in settings.json. Its
 // refreshes are `cache_warm` usage entries, which this clock reads as cache activity.
+//
+// With Jev set up (`/cache-guard jev`), it also keeps the context lean (`context.ts`): large tool
+// output is trimmed as it arrives, and a cold cache can be compacted in about a second.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 
 import { type CacheView, type LastRequest, type ModelInfo, lastRequest, view } from "./clock.ts";
-import { loadSettings } from "./config.ts";
+import { loadSettings, saveUserSettings } from "./config.ts";
+import { type Lean, leanContext, trimStatus } from "./context.ts";
 import { HerdrReporter } from "./herdr.ts";
+import { JEV_LOGINS, type JevState, label, probe } from "./jev.ts";
+import { JEV_KEY_URL, JEV_PITCH } from "./lean.ts";
 import { type AssistantLike, NOTICE_TYPE, type Notice, detectMiss, noticeLine } from "./notices.ts";
 import { Text } from "@earendil-works/pi-tui";
 import {
@@ -28,6 +34,16 @@ import {
 
 const STATUS_KEY = NAME;
 const TICK_MS = 1_000;
+const SUBCOMMANDS = ["status", "on", "off", "fresh", "compact", "jev"];
+/** The `/cache-guard jev` and `/cache-guard compact` choices. */
+const JEV_DONE = "Done";
+const JEV_ON = "Turn Jev on";
+const JEV_LEAVE_OFF = "Leave it off";
+const JEV_OFF = "Turn Jev off";
+const JEV_OFF_TIPS = "Turn Jev off (no more tips)";
+const JEV_ANY = "Use any provider that works (clear jev.provider)";
+const JEV_SETUP = "Set up Jev";
+const COMPACT_PI = "Compact with Pi's summary";
 /** The guidance choices after "Compact first". */
 const SUMMARY_DEFAULT = "Default summary";
 const SUMMARY_FOCUS = "Focus the summary on this prompt";
@@ -66,19 +82,30 @@ interface FreshStart {
 }
 const FRESH_KEY = Symbol.for("pi-cache-guard/fresh");
 
-export type Choice = "keep" | "compact" | "fresh" | "send" | "mute";
+export type Choice = "keep" | "jev" | "compact" | "fresh" | "send" | "mute";
+
+/** Under the cold-cache question while Jev is not set up (and not turned off). */
+export const JEV_TIP = "Tip: /cache-guard jev sets up Jev, which compacts in about a second for ~$0 (or turns this tip off).";
 
 /**
  * The ways through a cold cache, labelled with what they cost. Sending is first, so Enter sends as
- * if nothing had asked; Esc still keeps the prompt in the editor.
+ * if nothing had asked; Esc still keeps the prompt in the editor. With Jev there are two
+ * compactions: Jev's, written in code, and a summary (which Jev filters first when `filtered`, so
+ * its cost is an upper bound).
  */
-export function choiceMenu(v: CacheView): Array<{ choice: Choice; label: string }> {
+export function choiceMenu(v: CacheView, jev: { ready: boolean; filtered: boolean } = { ready: false, filtered: false }): Array<{ choice: Choice; label: string }> {
   const costs = v.price ? choiceCosts(v.last.tokens, v.price, v.ttlMs ?? 5 * 60_000) : undefined;
-  const about = (cost: number | undefined) => (cost === undefined ? "" : ` (~${formatCost(cost)})`);
+  const about = (cost: number | undefined, upTo = false) => (cost === undefined ? "" : ` (${upTo ? "up to " : ""}~${formatCost(cost)})`);
+  const compactions: Array<{ choice: Choice; label: string }> = jev.ready
+    ? [
+        { choice: "jev", label: "Compact with Jev, then send it (~1s, ~$0)" },
+        { choice: "compact", label: `Compact with a summary, then send it${about(costs?.compact, jev.filtered)}` },
+      ]
+    : [{ choice: "compact", label: `Compact first, then send it${about(costs?.compact)}` }];
   return [
     { choice: "send", label: `Send anyway${about(costs?.send)}` },
     { choice: "mute", label: "Send, and stop asking in this session" },
-    { choice: "compact", label: `Compact first, then send it${about(costs?.compact)}` },
+    ...compactions,
     { choice: "fresh", label: "Start a new session with this prompt (no history, ~$0)" },
     { choice: "keep", label: "Keep the prompt in the editor" },
   ];
@@ -93,6 +120,8 @@ export function coldCost(v: CacheView): number | undefined {
 export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrReporter } = {}) {
   // Inside a herdr pane: the `cache` token, so herdr's agents sidebar shows this session when doomed.
   const herdr = options.herdr ?? new HerdrReporter("pi");
+  // Jev: trimming tool output, and compaction.
+  const lean: Lean = leanContext(pi);
   let ctx: ExtensionContext | undefined;
   let settings: Settings = DEFAULT_SETTINGS;
   // A miss found at message_end, written at turn_end once the message itself is in the session.
@@ -239,9 +268,11 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
     if (!v?.cold) return { action: "continue" };
     const cost = coldCost(v);
     if (!worthWarning(v.last.tokens, cost, settings)) return { action: "continue" };
-    const menu = choiceMenu(v);
-    const label = await context.ui.select(`Prompt cache miss. ${describeMiss(v.cold, v.last.tokens, cost)}`, menu.map((item) => item.label));
-    const choice = menu.find((item) => item.label === label)?.choice ?? "keep";
+    const jev = await lean.jev(context);
+    const menu = choiceMenu(v, { ready: jev.kind === "ready", filtered: settings.compact.filter });
+    const title = `Prompt cache miss. ${describeMiss(v.cold, v.last.tokens, cost)}${jev.kind === "missing" ? `\n${JEV_TIP}` : ""}`;
+    const picked = await context.ui.select(title, menu.map((item) => item.label));
+    const choice = menu.find((item) => item.label === picked)?.choice ?? "keep";
     const keep = () => {
       context.ui.setEditorText(event.text);
       return { action: "handled" as const };
@@ -260,7 +291,22 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
         pending = { text: event.text, images: event.images };
         setTimeout(() => void pi.sendUserMessage(`/${NAME} fresh`, { expandPromptTemplates: true }), 0);
         return { action: "handled" };
+      case "jev":
+        // Jev judges the history against the held prompt and writes the summary in code. Strict: if
+        // Jev fails nothing is compacted (no surprise LLM summary), and the prompt goes back.
+        lean.armJevCompaction({ goal: event.text, strict: true });
+        context.ui.notify("Compacting with Jev, then sending your prompt.", "info");
+        context.compact({
+          onComplete: () => void pi.sendUserMessage(content),
+          onError: (error) => {
+            lean.disarm();
+            context.ui.notify(`Compaction with Jev did not run: ${lean.lastFailure() ?? error.message}. Your prompt is back in the editor.`, "warning");
+            context.ui.setEditorText(event.text);
+          },
+        });
+        return { action: "handled" };
       case "compact": {
+        lean.disarm();
         const how = await context.ui.select("Compact first: what should the summary keep?", [SUMMARY_DEFAULT, SUMMARY_FOCUS, SUMMARY_WRITE]);
         let guidance: string | undefined;
         if (how === SUMMARY_FOCUS) guidance = compactionFocus(event.text);
@@ -284,11 +330,101 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
     }
   });
 
+  /** `/cache-guard jev`: which Jev is in use and whether it answers; or how to set it up. */
+  const jevCommand = async (context: ExtensionContext) => {
+    const save = (patch: Record<string, unknown>) => {
+      try {
+        saveUserSettings({ jev: patch });
+        return true;
+      } catch (error) {
+        context.ui.notify(`Could not save the setting: ${error instanceof Error ? error.message : String(error)}`, "error");
+        return false;
+      }
+    };
+    const current = loadSettings(context.cwd);
+    if (!current.enabled) {
+      context.ui.notify("cache-guard is off in its settings (\"enabled\": false), Jev included.", "info");
+      return;
+    }
+    if (!current.jev.enabled) {
+      const pick = await context.ui.select(`Jev is off: no trimming, no Jev compaction, no tips.\n${JEV_PITCH}`, [JEV_ON, JEV_LEAVE_OFF]);
+      if (pick !== JEV_ON || !save({ enabled: true })) return;
+    }
+    const state = await lean.refresh(context);
+    if (state.kind === "ready") {
+      const answer = await probe(context.modelRegistry, state.target);
+      const head = answer.ok
+        ? `Jev: ${label(state.target)}, answered in ${answer.latencyMs} ms.`
+        : `Jev: ${label(state.target)} did not answer (${answer.reason}).`;
+      const others = state.others.map((target) => ({ target, text: `Use ${label(target)} instead` }));
+      const pick = await context.ui.select(
+        `${head} It trims large tool output and compacts in about a second: the cold-cache menu, /cache-guard compact.`,
+        [JEV_DONE, ...others.map((o) => o.text), JEV_OFF],
+      );
+      const other = others.find((o) => o.text === pick);
+      if (other && save({ provider: other.target.provider, model: other.target.model })) {
+        await lean.refresh(context);
+        context.ui.notify(`Jev: ${label(other.target)} from now on.`, "info");
+      } else if (pick === JEV_OFF && save({ enabled: false })) {
+        await lean.refresh(context);
+        context.ui.notify("Jev is off: no trimming, no Jev compaction, no tips. /cache-guard jev turns it back on.", "info");
+      }
+      return;
+    }
+    if (state.kind === "off") return;
+    const logins = JEV_LOGINS.map((login) => ({ ...login, text: `Log in to ${login.label}` }));
+    const options = [...logins.map((l) => l.text), ...(current.jev.provider ? [JEV_ANY] : []), JEV_OFF_TIPS];
+    const pick = await context.ui.select(
+      `Jev is not set up: ${state.reason}.\n${JEV_PITCH}\nIt needs a TypeSafe API key (${JEV_KEY_URL}; or TYPESAFE_API_KEY in the environment), or a provider that serves Jev: OpenRouter, Vercel AI Gateway, Cloudflare Workers AI, OpenCode.`,
+      options,
+    );
+    const login = logins.find((l) => l.text === pick);
+    if (login) {
+      context.ui.setEditorText(`/login ${login.provider}`);
+      context.ui.notify(`Press Enter to log in to ${login.provider}, then run /cache-guard jev to check.`, "info");
+    } else if (pick === JEV_ANY && save({ provider: "", model: "" })) {
+      await jevCommand(context);
+    } else if (pick === JEV_OFF_TIPS && save({ enabled: false })) {
+      await lean.refresh(context);
+      context.ui.notify("Jev is off: no trimming, no Jev compaction, no tips. /cache-guard jev turns it back on.", "info");
+    }
+  };
+
+  /** `/cache-guard compact [focus]`: Jev's compaction, written in code; nothing is spent if Jev fails. */
+  const compactCommand = async (focus: string, context: ExtensionContext) => {
+    const jev = await lean.jev(context);
+    if (jev.kind !== "ready") {
+      const why = jev.kind === "off" ? "Jev is off" : `Jev is not set up (${jev.reason})`;
+      const pick = await context.ui.select(`${why}. Compact with Pi's summary instead?`, [COMPACT_PI, JEV_SETUP]);
+      if (pick === JEV_SETUP) await jevCommand(context);
+      else if (pick === COMPACT_PI) {
+        context.compact({
+          customInstructions: focus || undefined,
+          onError: (error) => context.ui.notify(`Compaction failed: ${error.message}`, "warning"),
+        });
+      }
+      return;
+    }
+    lean.armJevCompaction({ strict: true, goal: focus || undefined });
+    const started = Date.now();
+    context.compact({
+      customInstructions: focus || undefined,
+      onComplete: () => context.ui.notify(`Compacted with Jev in ${((Date.now() - started) / 1000).toFixed(1)} s.`, "info"),
+      onError: (error) => {
+        lean.disarm();
+        context.ui.notify(`Compaction with Jev did not run: ${lean.lastFailure() ?? error.message}.`, "warning");
+      },
+    });
+  };
+
   pi.registerCommand(NAME, {
-    description: "Prompt cache: status, on, or off (this session)",
-    getArgumentCompletions: (prefix) => ["status", "on", "off", "fresh"].filter((v) => v.startsWith(prefix)).map((value) => ({ value, label: value })),
+    description: "Prompt cache and context: status, on, off, fresh, compact [focus], jev",
+    getArgumentCompletions: (prefix) => SUBCOMMANDS.filter((v) => v.startsWith(prefix)).map((value) => ({ value, label: value })),
     handler: async (args, context) => {
-      const command = args.trim() || "status";
+      const command = args.trim().split(/\s+/u)[0] || "status";
+      const rest = args.trim().slice(command.length).trim();
+      if (command === "jev") return jevCommand(context);
+      if (command === "compact") return compactCommand(rest, context);
       if (command === "fresh") {
         // A new session (linked to this one) that starts with the held prompt, or the editor's text.
         const carry = pending ?? (context.ui.getEditorText().trim() ? { text: context.ui.getEditorText() } : undefined);
@@ -340,9 +476,19 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
         }
       }
       lines.push(`Warning: ${sessionOn && settings.enabled && settings.warn.enabled ? `on, from ${formatCost(settings.warn.minCost)} (or ${formatTokens(settings.warn.minTokens)} tokens without prices)` : "off"}. Keep-warm: Pi's cacheWarming setting (/session shows its next decision).`);
+      lines.push(jevLine(await lean.jev(context), settings, lean.savedChars()));
       context.ui.notify(lines.join("\n"), "info");
     },
   });
+}
+
+/** The Jev line of `/cache-guard status`. */
+export function jevLine(jev: JevState, settings: Settings, savedChars: number): string {
+  if (jev.kind === "off") return "Jev: off (/cache-guard jev turns it on).";
+  if (jev.kind === "missing") return `Jev: not set up (${jev.reason}); /cache-guard jev.`;
+  const trim = settings.trim.enabled ? `trimming on${savedChars ? ` (${trimStatus(savedChars)?.replace("lean: ", "")} so far)` : ""}` : "trimming off";
+  const compaction = `Jev compaction from the cold-cache menu and /cache-guard compact${settings.compact.filter ? "; it filters /compact too" : ""}`;
+  return `Jev: ${label(jev.target)}; ${trim}; ${compaction}.`;
 }
 
 /** In the new session: the old session's model and thinking level, then the held prompt. */

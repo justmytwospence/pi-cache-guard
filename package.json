@@ -1,7 +1,7 @@
 {
   "name": "@justmytwospence/pi-cache-guard",
   "version": "0.1.0",
-  "description": "Asks before a Pi prompt that would re-cache a large conversation, and shows the prompt cache's time left in the footer.",
+  "description": "Asks before a Pi prompt that would re-cache a large conversation, shows the prompt cache's time left, and keeps the context lean with Jev: trimmed tool output and one-second compaction.",
   "type": "module",
   "license": "MIT",
   "private": true,
@@ -9,7 +9,8 @@
     "pi-package",
     "pi-extension",
     "pi",
-    "prompt-cache"
+    "prompt-cache",
+    "jev"
   ],
   "pi": {
     "extensions": [
@@ -19,7 +20,8 @@
   "scripts": {
     "check": "npm run typecheck && npm test",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "eval": "vitest run --config vitest.eval.config.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
