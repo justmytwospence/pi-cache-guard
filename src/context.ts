@@ -40,6 +40,8 @@ import { extractUnits, filterMessages, lastUserMessages, recentTexts } from "./u
 export const DECISION_TYPE = "cache-guard:jev";
 /** pi-status-footer folds `lean: …` under this key into its context row. */
 export const TRIM_STATUS_KEY = "lean-context";
+/** A missing Jev is looked for again at most this often (after a `/login`, say). */
+const RECHECK_MS = 60_000;
 
 type Content = { type: string; text?: string; [key: string]: unknown };
 
@@ -82,6 +84,7 @@ export function leanContext(pi: ExtensionAPI): Lean {
   let jevKey = "";
   let jevState: Promise<JevState> = Promise.resolve({ kind: "missing", reason: "not checked yet" });
   let current: JevState | undefined;
+  let checkedAt = 0;
   let armed: JevCompaction | undefined;
   let failure: string | undefined;
   let saved = 0;
@@ -90,6 +93,7 @@ export function leanContext(pi: ExtensionAPI): Lean {
   const keyOf = (s: Settings) => JSON.stringify([s.enabled, s.jev]);
   const refresh = (ctx: ExtensionContext) => {
     jevKey = keyOf(settings);
+    checkedAt = Date.now();
     const next = resolveJev(ctx.modelRegistry, { ...settings.jev, enabled: settings.enabled && settings.jev.enabled });
     jevState = next;
     void next.then((state) => {
@@ -97,10 +101,10 @@ export function leanContext(pi: ExtensionAPI): Lean {
     });
     return next;
   };
-  /** New settings, or a Jev that was missing (credentials may have arrived): look again. */
+  /** New settings, or a Jev that was missing a minute ago (credentials may have arrived): look again. */
   const reload = (ctx: ExtensionContext) => {
     settings = loadSettings(ctx.cwd);
-    if (keyOf(settings) !== jevKey || current?.kind === "missing") void refresh(ctx);
+    if (keyOf(settings) !== jevKey || (current?.kind === "missing" && Date.now() - checkedAt >= RECHECK_MS)) void refresh(ctx);
   };
 
   pi.on("session_start", (_event, ctx) => {

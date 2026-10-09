@@ -197,7 +197,14 @@ test("strict: a Jev failure cancels the compaction and says why; overflow falls 
 });
 
 test("resolveJev: the configured provider, else the most direct one Pi can reach", async () => {
-  const available = (...ids: string[]) => ({ getAvailableOfType: async () => ids.map((id) => ({ provider: id.split("/")[0], id: id.slice(id.indexOf("/") + 1) })), classify: () => undefined });
+  const asked: Array<string | undefined> = [];
+  const available = (...ids: string[]) => ({
+    getAvailableOfType: async (_type: string, provider?: string) => {
+      asked.push(provider);
+      return ids.map((id) => ({ provider: id.split("/")[0]!, id: id.slice(id.indexOf("/") + 1) })).filter((m) => m.provider === provider);
+    },
+    classify: () => undefined,
+  });
   expect(await resolveJev(available("openrouter/~typesafe/jev-latest", "typesafe/jev-latest"), { enabled: true, provider: "", model: "" })).toEqual({
     kind: "ready",
     target: JEV_MODELS[0],
@@ -211,4 +218,6 @@ test("resolveJev: the configured provider, else the most direct one Pi can reach
   expect(await resolveJev(available(), { enabled: true, provider: "", model: "" })).toEqual({ kind: "missing", reason: "no provider with Jev has credentials" });
   expect(await resolveJev(available("typesafe/jev-latest"), { enabled: false, provider: "", model: "" })).toEqual({ kind: "off" });
   expect(await resolveJev({}, { enabled: true, provider: "", model: "" })).toMatchObject({ kind: "missing", reason: expect.stringContaining("classifier") });
+  // Only the providers that serve Jev are asked.
+  expect(new Set(asked)).toEqual(new Set(["typesafe", "openrouter", "vercel-ai-gateway", "cloudflare-workers-ai", "opencode"]));
 });

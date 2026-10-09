@@ -25,7 +25,7 @@ interface ClassifierResult {
 /** The part of Pi's model registry this package uses. */
 interface ClassifierRegistry {
   findOfType(type: "classifier", provider: string, modelId: string): unknown;
-  getAvailableOfType(type: "classifier"): Promise<readonly { provider: string; id: string }[]>;
+  getAvailableOfType(type: "classifier", provider?: string): Promise<readonly { provider: string; id: string }[]>;
   classify(
     model: never,
     context: { state: Record<string, unknown>; questions: Record<string, Question> },
@@ -71,11 +71,15 @@ export async function resolveJev(registry: unknown, settings: { enabled: boolean
   if (typeof reg?.classify !== "function" || typeof reg.getAvailableOfType !== "function") {
     return { kind: "missing", reason: "this Pi has no classifier models (needs Pi 0.99 or newer)" };
   }
-  let available: readonly { provider: string; id: string }[];
-  try {
-    available = await reg.getAvailableOfType("classifier");
-  } catch (error) {
-    return { kind: "missing", reason: error instanceof Error ? error.message : String(error) };
+  // Only the providers that serve Jev are asked, so no other provider's credentials are resolved.
+  const providers = [...new Set([...(settings.provider ? [settings.provider] : []), ...JEV_MODELS.map((t) => t.provider)])];
+  const available: { provider: string; id: string }[] = [];
+  for (const provider of providers) {
+    try {
+      available.push(...(await reg.getAvailableOfType("classifier", provider)));
+    } catch {
+      // A provider whose credentials fail to resolve does not serve Jev here.
+    }
   }
   const has = (t: JevTarget) => available.some((m) => m.provider === t.provider && m.id === t.model);
   const found = JEV_MODELS.filter(has);
