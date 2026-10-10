@@ -58,8 +58,8 @@ path's total.
 It also asks when the selected model differs from the one the conversation was cached for (each
 model has its own cache). For models without a published TTL (OpenAI and Codex models) it asks
 after `warn.idleMinutes` (default 180) idle, worded as a likelihood. Commands (`/...`), shell
-input (`!...`), steering and follow-ups while the agent runs, and input from other extensions are
-never held.
+input (`!...`), prompts with attached images, steering and follow-ups while the agent runs, and
+input from other extensions are never held.
 
 **Trims tool output (Jev).** Large text results (over 12k characters from `bash`, `grep`, `find`,
 `ls`, MCP and web tools; over 50k from `read`) are trimmed before they enter the context, so the
@@ -156,7 +156,8 @@ newer.
 ## Settings
 
 `~/.config/agents/cache-guard.json` (shared with the other ports), then `~/.pi/agent/cache-guard.json`,
-then the project's `.agents/cache-guard.json` and `.pi/cache-guard.json`. Later files win; objects
+then the project's `.agents/cache-guard.json` and `.pi/cache-guard.json` only when Pi trusts the
+project. Untrusted projects cannot override the shared or user settings. Later files win; objects
 merge. Pi reads all but `warm`; the defaults:
 
 ```json
@@ -183,7 +184,8 @@ Jev's decisions are recorded in the session as `cache-guard:jev` entries (never 
 - The clock is the API's guaranteed minimum, measured from each request's start; entries are
   deleted soon after it, not exactly at it. Other invalidations (tool or system prompt changes,
   an MCP server reconnecting) are not visible to it.
-- Images attached to a held prompt are not put back in the editor.
+- Prompts with attached images bypass the warning because Pi's editor API cannot restore the
+  attachments when a held prompt is cancelled.
 - A Jev summary is assembled, not written: the requests, the items Jev kept word for word and a
   line for the rest. Pi's summary reads better when the history needs explaining.
 

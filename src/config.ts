@@ -7,14 +7,14 @@ import { DEFAULT_SETTINGS, NAME, type Settings, mergeSettings } from "./core.ts"
 /**
  * Shared `~/.config/agents/cache-guard.json`, then `~/.pi/agent/cache-guard.json`, then the
  * project's `.agents/cache-guard.json` and `.pi/cache-guard.json`, each on top of the last (objects
- * merge, other values replace). Unreadable or invalid files are ignored.
+ * merge, other values replace). Project files apply only when trusted. Unreadable or invalid
+ * files are ignored.
  */
-export function loadSettings(cwd: string): Settings {
+export function loadSettings(cwd: string, projectTrusted: boolean): Settings {
   const files = [
     path.join(sharedConfigDir(), `${NAME}.json`),
     userSettingsFile(),
-    path.join(cwd, ".agents", `${NAME}.json`),
-    path.join(cwd, ".pi", `${NAME}.json`),
+    ...(projectTrusted ? [path.join(cwd, ".agents", `${NAME}.json`), path.join(cwd, ".pi", `${NAME}.json`)] : []),
   ];
   return mergeSettings(DEFAULT_SETTINGS, files.map((file) => {
     try {

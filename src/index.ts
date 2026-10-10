@@ -6,7 +6,7 @@
 // With Jev set up (`/cache-guard jev`), it also keeps the context lean (`context.ts`): large tool
 // output is trimmed as it arrives, and a cold cache can be compacted in about a second.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
+import type { ImageContent } from "@earendil-works/pi-ai";
 
 import { type CacheView, type LastRequest, type ModelInfo, lastRequest, view } from "./clock.ts";
 import { loadSettings, saveUserSettings } from "./config.ts";
@@ -203,7 +203,7 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
     ctx = context;
     sessionOn = true;
     askOn = true;
-    settings = loadSettings(context.cwd);
+    settings = loadSettings(context.cwd, context.isProjectTrusted());
     pendingMiss = undefined;
     seenWarm = new Set(recentWarms(context).map((entry) => entry.id!));
     if (!context.hasUI) return;
@@ -262,8 +262,8 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
       return { action: "continue" };
     }
     const text = event.text.trim();
-    if (!text || text.startsWith("/") || text.startsWith("!")) return { action: "continue" };
-    settings = loadSettings(context.cwd);
+    if (!text || text.startsWith("/") || text.startsWith("!") || event.images?.length) return { action: "continue" };
+    settings = loadSettings(context.cwd, context.isProjectTrusted());
     const v = current(context);
     if (!v?.cold) return { action: "continue" };
     const cost = coldCost(v);
@@ -277,9 +277,6 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
       context.ui.setEditorText(event.text);
       return { action: "handled" as const };
     };
-    const content: string | (TextContent | ImageContent)[] = event.images?.length
-      ? [{ type: "text", text: event.text }, ...event.images]
-      : event.text;
     switch (choice) {
       case "send":
         return { action: "continue" };
@@ -297,7 +294,7 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
         lean.armJevCompaction({ goal: event.text, strict: true });
         context.ui.notify("Compacting with Jev, then sending your prompt.", "info");
         context.compact({
-          onComplete: () => void pi.sendUserMessage(content),
+          onComplete: () => void pi.sendUserMessage(event.text),
           onError: (error) => {
             lean.disarm();
             context.ui.notify(`Compaction with Jev did not run: ${lean.lastFailure() ?? error.message}. Your prompt is back in the editor.`, "warning");
@@ -317,7 +314,7 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
         context.ui.notify("Compacting, then sending your prompt.", "info");
         context.compact({
           customInstructions: guidance?.trim() || undefined,
-          onComplete: () => void pi.sendUserMessage(content),
+          onComplete: () => void pi.sendUserMessage(event.text),
           onError: (error) => {
             context.ui.notify(`Compaction failed (${error.message}); your prompt is back in the editor.`, "warning");
             context.ui.setEditorText(event.text);
@@ -341,7 +338,7 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
         return false;
       }
     };
-    const current = loadSettings(context.cwd);
+    const current = loadSettings(context.cwd, context.isProjectTrusted());
     if (!current.enabled) {
       context.ui.notify("cache-guard is off in its settings (\"enabled\": false), Jev included.", "info");
       return;
@@ -456,7 +453,7 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
         context.ui.notify(`cache-guard ${command} for this session`, "info");
         return;
       }
-      settings = loadSettings(context.cwd);
+      settings = loadSettings(context.cwd, context.isProjectTrusted());
       const v = current(context);
       const lines: string[] = [];
       if (!v) {
