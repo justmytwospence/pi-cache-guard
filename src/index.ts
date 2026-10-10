@@ -118,8 +118,10 @@ export function coldCost(v: CacheView): number | undefined {
 }
 
 export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrReporter } = {}) {
-  // Inside a herdr pane: the `cache` token, so herdr's agents sidebar shows this session when doomed.
-  const herdr = options.herdr ?? new HerdrReporter("pi");
+  // Inside a herdr pane (through pi-herdr): the `cache` token, so herdr's agents sidebar shows this
+  // session when doomed.
+  const herdr = options.herdr ?? new HerdrReporter(pi.events);
+  pi.events?.on("herdr:ready", () => herdr.resend());
   // Jev: trimming tool output, and compaction.
   const lean: Lean = leanContext(pi);
   let ctx: ExtensionContext | undefined;

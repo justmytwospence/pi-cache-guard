@@ -5,7 +5,7 @@ import path from "node:path";
 
 import cacheGuard, { JEV_TIP, modelInfo, statusText } from "../src/index.ts";
 import { lastRequest, view } from "../src/clock.ts";
-import { HerdrReporter, herdrTarget } from "../src/herdr.ts";
+import { HerdrReporter } from "../src/herdr.ts";
 
 const NOW = Date.parse("2026-10-07T12:00:00Z");
 const opus = {
@@ -55,7 +55,7 @@ describe("clock", () => {
 });
 
 function harness(entries: unknown[], model: any = opus, registry: Record<string, unknown> = {}) {
-  return harnessWith(entries, new HerdrReporter("pi", undefined), model, registry);
+  return harnessWith(entries, new HerdrReporter(undefined), model, registry);
 }
 
 function harnessWith(entries: unknown[], herdr: HerdrReporter, model: any = opus, registry: Record<string, unknown> = {}) {
@@ -195,7 +195,7 @@ describe("herdr", () => {
 
   function reporter() {
     const sent: any[] = [];
-    const r = new HerdrReporter("pi", { socketPath: "/s", paneId: "w1:p1" }, async (_t, request) => { sent.push(request.params); return true; });
+    const r = new HerdrReporter({ emit: (channel, data) => { expect(channel).toBe("herdr:token"); sent.push(data); } });
     return { r, sent };
   }
 
@@ -204,18 +204,20 @@ describe("herdr", () => {
     const entries: unknown[] = [assistant(NOW - 60_000, 600_000)];
     const h = harnessWith(entries, r);
     await h.emit("session_start", {});
-    expect(sent.map((p) => p.tokens.cache)).toEqual([null]); // stale token from an earlier session cleared
+    expect(sent).toEqual([{ key: "cache", value: undefined }]); // the first report always goes out
     vi.advanceTimersByTime(60_000);
     expect(sent.length).toBe(1); // still warm: nothing new
     vi.advanceTimersByTime(200_000);
-    expect(sent.at(-1)).toMatchObject({ pane_id: "w1:p1", source: "cache-guard", agent: "pi", tokens: { cache: "cold 601k" }, ttl_ms: 86_400_000 });
+    expect(sent.at(-1)).toEqual({ key: "cache", value: "cold 601k" });
     entries.push(assistant(Date.now(), 610_000));
     vi.advanceTimersByTime(1_000);
-    expect(sent.at(-1).tokens.cache).toBeNull();
+    expect(sent.at(-1).value).toBeUndefined();
     vi.advanceTimersByTime(400_000);
-    expect(sent.at(-1).tokens.cache).toBe("cold 611k");
+    expect(sent.at(-1).value).toBe("cold 611k");
+    r.resend();
+    expect(sent.at(-1).value).toBe("cold 611k");
     await h.emit("session_shutdown", {});
-    expect(sent.at(-1).tokens.cache).toBeNull();
+    expect(sent.at(-1).value).toBeUndefined();
   });
 
   test("small caches never show", async () => {
@@ -223,12 +225,14 @@ describe("herdr", () => {
     const h = harnessWith([assistant(NOW - 900_000, 50_000)], r);
     await h.emit("session_start", {});
     vi.advanceTimersByTime(5_000);
-    expect(sent.map((p) => p.tokens.cache)).toEqual([null]);
+    expect(sent.map((p) => p.value)).toEqual([undefined]);
   });
 
-  test("outside herdr nothing is sent", () => {
-    expect(herdrTarget({})).toBeUndefined();
-    expect(herdrTarget({ HERDR_ENV: "1", HERDR_SOCKET_PATH: "/s", HERDR_PANE_ID: "w1:p1" })).toEqual({ socketPath: "/s", paneId: "w1:p1" });
+  test("without an event bus nothing is sent", () => {
+    const r = new HerdrReporter(undefined);
+    r.report("cold 1M");
+    r.resend();
+    return expect(r.clear()).resolves.toBe(true);
   });
 });
 

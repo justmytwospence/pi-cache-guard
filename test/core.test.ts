@@ -112,25 +112,4 @@ describe("herdr token", () => {
     expect(herdrCacheValue(undefined, 664_000, 3.19, DEFAULT_SETTINGS)).toBeUndefined();
     expect(herdrCacheValue({ kind: "expired", idleMs: 1 }, 664_000, 3.19, mergeSettings(DEFAULT_SETTINGS, ['{"herdr":{"enabled":false}}']))).toBeUndefined();
   });
-
-  test("speaks herdr's socket protocol", async () => {
-    const net = await import("node:net");
-    const os = await import("node:os");
-    const path = await import("node:path");
-    const { herdrRequest, sendHerdr } = await import("../src/herdr.ts");
-    const socketPath = path.join(os.tmpdir(), `cg-${process.pid}.sock`);
-    const lines: string[] = [];
-    const server = net.createServer((socket) => socket.on("data", (data) => { lines.push(String(data)); socket.end('{"id":"x","result":{}}\n'); }));
-    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
-    try {
-      const target = { socketPath, paneId: "w1:p2" };
-      expect(await sendHerdr(target, herdrRequest(target, "pi", "cold 1M"))).toBe(true);
-      const request = JSON.parse(lines[0]!);
-      expect(request.method).toBe("pane.report_metadata");
-      expect(request.params).toMatchObject({ pane_id: "w1:p2", source: "cache-guard", agent: "pi", tokens: { cache: "cold 1M" } });
-      expect(await sendHerdr({ socketPath: "/nonexistent.sock", paneId: "x" }, request)).toBe(false);
-    } finally {
-      server.close();
-    }
-  });
 });
