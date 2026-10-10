@@ -1,7 +1,8 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { expect, test, vi } from "vitest";
 
 import { DECISION_TYPE, leanContext } from "../src/context.ts";
+import { userSettingsFile } from "../src/config.ts";
 import { JEV_MODELS, resolveJev } from "../src/jev.ts";
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
@@ -47,6 +48,7 @@ function setup(answer: Answerer, available?: Array<{ provider: string; id: strin
   const status = new Map<string, string | undefined>();
   const ctx: any = {
     cwd: "/nonexistent",
+    isProjectTrusted: () => false,
     hasUI: true,
     model: { provider: "anthropic", id: "claude-opus-5-5" },
     modelRegistry: reg,
@@ -194,6 +196,26 @@ test("strict: a Jev failure cancels the compaction and says why; overflow falls 
   expect(await none.emit("session_before_compact", compaction())).toEqual({ cancel: true });
   expect(none.lean.lastFailure()).toBe("Jev is not set up (no provider with Jev has credentials)");
   expect(await none.emit("session_before_compact", compaction())).toBeUndefined();
+});
+
+test("Jev off leaves automatic compaction alone without a fallback warning", async () => {
+  writeFileSync(userSettingsFile(), JSON.stringify({ jev: { enabled: false } }));
+  try {
+    const { lean, reg, emit, entries, notes } = setup(keepFirstDropSecond);
+    await emit("session_start", {});
+    for (const reason of ["manual", "threshold", "overflow"]) {
+      expect(await emit("session_before_compact", compaction(reason))).toBeUndefined();
+    }
+    expect(reg.calls).toEqual([]);
+    expect(entries).toEqual([]);
+    expect(notes).toEqual([]);
+    expect(lean.lastFailure()).toBeUndefined();
+    lean.armJevCompaction({ strict: true });
+    expect(await emit("session_before_compact", compaction())).toEqual({ cancel: true });
+    expect(lean.lastFailure()).toBe("Jev is off");
+  } finally {
+    rmSync(userSettingsFile(), { force: true });
+  }
 });
 
 test("resolveJev: the configured provider, else the most direct one Pi can reach", async () => {

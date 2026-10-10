@@ -103,12 +103,12 @@ export function leanContext(pi: ExtensionAPI): Lean {
   };
   /** New settings, or a Jev that was missing a minute ago (credentials may have arrived): look again. */
   const reload = (ctx: ExtensionContext) => {
-    settings = loadSettings(ctx.cwd);
+    settings = loadSettings(ctx.cwd, ctx.isProjectTrusted());
     if (keyOf(settings) !== jevKey || (current?.kind === "missing" && Date.now() - checkedAt >= RECHECK_MS)) void refresh(ctx);
   };
 
   pi.on("session_start", (_event, ctx) => {
-    settings = loadSettings(ctx.cwd);
+    settings = loadSettings(ctx.cwd, ctx.isProjectTrusted());
     current = undefined;
     saved = 0;
     armed = undefined;
@@ -183,6 +183,7 @@ export function leanContext(pi: ExtensionAPI): Lean {
     };
     if (!settings.enabled || (!jevOnly && !settings.compact.filter)) return undefined;
     const jev = await jevState;
+    if (jev.kind === "off" && !request) return undefined;
     if (jev.kind !== "ready") return jevOnly ? fail(jev.kind === "off" ? "Jev is off" : `Jev is not set up (${jev.reason})`) : undefined;
     const prep = event.preparation;
     const main = extractUnits(prep.messagesToSummarize, "U");
@@ -265,7 +266,7 @@ export function leanContext(pi: ExtensionAPI): Lean {
       return jevState;
     },
     refresh: (ctx) => {
-      settings = loadSettings(ctx.cwd);
+      settings = loadSettings(ctx.cwd, ctx.isProjectTrusted());
       return refresh(ctx);
     },
     armJevCompaction: (options) => {

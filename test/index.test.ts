@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 import cacheGuard, { JEV_TIP, modelInfo, statusText } from "../src/index.ts";
@@ -105,7 +106,7 @@ function harnessWith(entries: unknown[], herdr: HerdrReporter, model: any = opus
   const sent: any[] = [];
   const sessions: any[] = [];
   const ctx: any = {
-    cwd: "/nonexistent", hasUI: true, model, ui,
+    cwd: "/nonexistent", isProjectTrusted: () => false, hasUI: true, model, ui,
     sessionManager: { getBranch: () => entries, getSessionFile: () => "/sessions/old.jsonl" },
     compact: (options: any) => ui.compactions.push(options),
     modelRegistry: { find: (provider: string, id: string) => ({ ...model, provider, id }), ...registry },
@@ -159,6 +160,18 @@ describe("extension", () => {
     expect(h.ui.editor).toBe("next step please");
     h.ui.answer = "Send anyway";
     expect(await h.emit("input", input("next step please"))).toEqual({ action: "continue" });
+  });
+
+  test("image prompts pass without a menu or editor restoration", async () => {
+    const h = harness([assistant(NOW - 900_000, 600_000)]);
+    await h.emit("session_start", {});
+    h.ui.answer = undefined;
+    const event = { ...input("check this image"), images: [{ type: "image", mimeType: "image/png", data: "synthetic" }] };
+    expect(await h.emit("input", event)).toEqual({ action: "continue" });
+    expect(event.images).toEqual([{ type: "image", mimeType: "image/png", data: "synthetic" }]);
+    expect(h.ui.menus).toEqual([]);
+    expect(h.ui.editor).toBe("");
+    expect(h.sent).toEqual([]);
   });
 
   test("small contexts, commands, steering and extension input pass", async () => {
@@ -472,6 +485,28 @@ describe("jev", () => {
     expect(h.ui.titles[0]).toBe("Jev is not set up (no provider with Jev has credentials). Compact with Pi's summary instead?");
     expect(h.ui.compactions).toHaveLength(1);
     expect(await h.emit("session_before_compact", preparation())).toBeUndefined();
+  });
+
+  test("untrusted project settings cannot re-enable Jev in the menu or compaction", async () => {
+    const cwd = mkdtempSync(path.join(tmpdir(), "cache-guard-untrusted-"));
+    mkdirSync(path.join(cwd, ".pi"));
+    writeFileSync(path.join(cwd, ".pi/cache-guard.json"), JSON.stringify({ jev: { enabled: true }, compact: { filter: true } }));
+    writeFileSync(userFile(), JSON.stringify({ jev: { enabled: false }, compact: { filter: false } }));
+    const registry = jevRegistry();
+    const h = cold(registry);
+    h.ctx.cwd = cwd;
+    try {
+      await h.emit("session_start", {});
+      h.ui.answer = undefined;
+      await h.emit("input", input("next"));
+      expect(h.ui.menus[0]).toContain("Compact first, then send it (~$2.40)");
+      expect(h.ui.menus[0]).not.toContain("Compact with Jev, then send it (~1s, ~$0)");
+      expect(await h.emit("session_before_compact", preparation())).toBeUndefined();
+      expect(registry.calls).toEqual([]);
+    } finally {
+      await h.emit("session_shutdown", {});
+      rmSync(cwd, { recursive: true, force: true });
+    }
   });
 
   test("status reports Jev", async () => {
